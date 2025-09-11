@@ -1,0 +1,14 @@
+#Ignore mushrooms_train.csv and mushrooms_test.csv
+mushrooms_train.csv
+mushrooms_test.csv
+
+#Ignore tennis_train.csv and tennis_test.csv
+tennis_train.csv
+tennis_test.csv
+
+#Ignore cars_train.csv and cars_test.csv
+cars_train.csv
+cars_test.csv
+#Ignore heart_train.csv and heart_test.csv
+heart_train.csv
+heart_test.csv
