@@ -10,7 +10,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold
+from sklearn.model_selection import (
+    train_test_split, GridSearchCV, StratifiedKFold, learning_curve, validation_curve
+)
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.pipeline import Pipeline
@@ -23,7 +25,7 @@ def main():
     # Required argument to run: CSV path
     parser.add_argument("csv_path")
     # Optional arguments: hyperparameters, options
-    parser.add_argument("--test_size", type=float, default=0.3)
+    parser.add_argument("--test_size", type=float, default=0.2)
     parser.add_argument("--max_depth", type=int, default=4)
     parser.add_argument("--min_samples_split", type=int, default=2)
     parser.add_argument("--min_samples_leaf", type=int, default=1)
@@ -90,7 +92,7 @@ def main():
         ("model", tree)
     ])
 
-    # GridSearchCV (Always on) – performs validation via cross-validation on the training set
+    # GridSearchCV – performs validation via cross-validation on the training set
     n_splits = safe_stratified_cv(y_train, max_k=5)
     cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=args.random_state)
 
@@ -129,13 +131,31 @@ def main():
     print("  Train:", train_acc)
     print("  Test :", test_acc)
 
-    # === Bias diagnosis (NEW) ===
+    # Bias diagnosis
     bias_level, bias_text = diagnose_bias(train_acc)
     print("\nBias diagnosis:", bias_level)
     print("Explanation:", bias_text)
 
-    # === Train vs Test accuracy bar chart (NEW) ===
+    # Train vs Test accuracy bar chart
     plot_train_test_accuracy(train_acc, test_acc, title="Accuracy: Train vs Test")
+
+    # Variance diagnosis
+    var_level, var_gap, var_text = diagnose_variance(train_acc, test_acc)
+    print("\nVariance diagnosis:", var_level)
+    print(f"Generalization gap (Train - Test): {var_gap:.4f}")
+    print("Explanation:", var_text)
+
+    # Learning curve: Train vs CV 
+    plot_learning_curve_accuracy(
+        pipe, X_train, y_train, cv=cv,
+        title="Learning Curve (Train vs Cross-Validation Accuracy)"
+    )
+
+    # Validation curve: accuracy vs max_depth
+    plot_validation_curve_max_depth(
+        pipe, X_train, y_train, cv=cv,
+        title="Validation Curve (max_depth)"
+    )
 
     # Confusion matrix (test) console output
     print("\nConfusion Matrix (Test)")
@@ -190,8 +210,6 @@ def safe_stratified_cv(y, max_k=5):
     min_per_class = y.value_counts().min()
     return max(2, min(max_k, int(min_per_class)))
 
-# === NEW HELPERS FOR BIAS AND ACCURACY PLOT ===
-
 def diagnose_bias(train_acc):
     """
     Diagnose bias level using training accuracy only:
@@ -201,17 +219,40 @@ def diagnose_bias(train_acc):
     """
     if train_acc < 0.60:
         level = "HIGH"
-        rationale = ("Low training accuracy (<60%). The model fails to capture the underlying patterns "
+        rationale = ("Low training accuracy (<60%). The model fails to capture underlying patterns "
                      "(likely underfitting / high bias).")
     elif train_acc < 0.80:
         level = "MEDIUM"
-        rationale = ("Moderate training accuracy (60–80%). The model learns some patterns but still shows "
-                     "systematic errors (moderate bias).")
+        rationale = ("Moderate training accuracy (60–80%). The model learns some patterns but still "
+                     "shows systematic errors (moderate bias).")
     else:
         level = "LOW"
-        rationale = ("High training accuracy (≥80%). The model captures the relationship between variables "
-                     "well (low bias).")
+        rationale = ("High training accuracy (≥80%). The model captures relationships well (low bias).")
     return level, rationale
+
+def diagnose_variance(train_acc, test_acc):
+    """
+    Diagnose variance level from the generalization gap = train_acc - test_acc.
+    Heuristics:
+      - Low variance:    |gap| < 0.05
+      - Medium variance: 0.05 <= |gap| < 0.15
+      - High variance:   |gap| >= 0.15
+    """
+    gap = float(train_acc) - float(test_acc)
+    agap = abs(gap)
+    if agap < 0.05:
+        level = "LOW"
+        rationale = ("Train and test accuracies are very close (<5pp difference). "
+                     "The model generalizes well (low variance).")
+    elif agap < 0.15:
+        level = "MEDIUM"
+        rationale = ("There is a moderate gap (5–15pp). Some overfitting is present, "
+                     "but not extreme (medium variance).")
+    else:
+        level = "HIGH"
+        rationale = ("Large generalization gap (≥15pp). The model likely overfits the training data "
+                     "(high variance).")
+    return level, gap, rationale
 
 def plot_train_test_accuracy(train_acc, test_acc, title="Accuracy: Train vs Test"):
     """Bar chart comparing Train vs Test accuracy."""
@@ -225,6 +266,79 @@ def plot_train_test_accuracy(train_acc, test_acc, title="Accuracy: Train vs Test
     plt.title(title)
     plt.ylabel("Accuracy")
     plt.xlabel("")
+    plt.tight_layout()
+    plt.show()
+
+def plot_learning_curve_accuracy(estimator, X, y, cv, title="Learning Curve"):
+    """
+    Plot learning curves (train vs cross-validation accuracy) across increasing training sizes.
+    If the CV curve stays much lower than the train curve and does not close as data increases,
+    variance is high; if both are low, bias is high; if both are high and close, it's a good fit.
+    """
+    train_sizes, train_scores, val_scores = learning_curve(
+        estimator, X, y,
+        cv=cv,
+        scoring="accuracy",
+        train_sizes=np.linspace(0.1, 1.0, 5),
+        n_jobs=-1,
+        shuffle=True,
+        random_state=None
+    )
+    train_mean = train_scores.mean(axis=1)
+    train_std  = train_scores.std(axis=1)
+    val_mean   = val_scores.mean(axis=1)
+    val_std    = val_scores.std(axis=1)
+
+    plt.figure(figsize=(6, 4))
+    plt.plot(train_sizes, train_mean, marker="o", label="Train (mean CV split)")
+    plt.fill_between(train_sizes, train_mean - train_std, train_mean + train_std, alpha=0.2)
+    plt.plot(train_sizes, val_mean, marker="o", label="Cross-Validation (mean)")
+    plt.fill_between(train_sizes, val_mean - val_std, val_mean + val_std, alpha=0.2)
+    plt.title(title)
+    plt.xlabel("Training samples")
+    plt.ylabel("Accuracy")
+    plt.ylim(0, 1.0)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+def plot_validation_curve_max_depth(estimator, X, y, cv, title="Validation Curve (max_depth)"):
+    """
+    Plot validation curve for the tree's max_depth.
+    - Overfitting signature: Train rises while Validation drops for larger depths.
+    - Underfitting signature: Both Train and Validation remain low across depths.
+    - Good fit: Both are high and relatively close around some depth range.
+    """
+    param_range = [2, 3, 4, 5, 6, None]
+
+    train_scores, val_scores = validation_curve(
+        estimator, X, y,
+        param_name="model__max_depth",
+        param_range=param_range,
+        cv=cv,
+        scoring="accuracy",
+        n_jobs=-1
+    )
+
+    train_mean = train_scores.mean(axis=1)
+    train_std  = train_scores.std(axis=1)
+    val_mean   = val_scores.mean(axis=1)
+    val_std    = val_scores.std(axis=1)
+
+    x = np.arange(len(param_range))
+    labels = [str(p) for p in param_range]
+
+    plt.figure(figsize=(6, 4))
+    plt.plot(x, train_mean, marker="o", label="Train")
+    plt.fill_between(x, train_mean - train_std, train_mean + train_std, alpha=0.2)
+    plt.plot(x, val_mean, marker="o", label="Cross-Validation")
+    plt.fill_between(x, val_mean - val_std, val_mean + val_std, alpha=0.2)
+    plt.xticks(x, labels)
+    plt.xlabel("max_depth")
+    plt.ylabel("Accuracy")
+    plt.ylim(0, 1.0)
+    plt.title(title)
+    plt.legend()
     plt.tight_layout()
     plt.show()
 
