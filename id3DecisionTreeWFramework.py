@@ -40,8 +40,8 @@ def main():
 
     # Strip whitespace from categoricals
     for c in X.columns:
-        X[c] = X[c].astype(str).str.strip()
-    y = y.astype(str).str.strip()
+        X[c] = X[c].astype(str).str.strip().str.lower()
+    y = y.astype(str).str.strip().str.lower()
 
     # Split into train and test (validation is performed via cross-validation in GridSearchCV)
     X_train, X_test, y_train, y_test = train_test_split(
