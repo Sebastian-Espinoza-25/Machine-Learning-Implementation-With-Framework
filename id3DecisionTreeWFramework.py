@@ -18,6 +18,7 @@ from sklearn.preprocessing import OneHotEncoder
 from sklearn.pipeline import Pipeline
 from sklearn.tree import DecisionTreeClassifier, export_text
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+from sklearn.ensemble import BaggingClassifier
 
 # LOGIC
 def main():
@@ -78,7 +79,7 @@ def main():
     )
 
     # Base tree (ID3-like using entropy)
-    tree = DecisionTreeClassifier(
+    base_tree = DecisionTreeClassifier(
         criterion="entropy",
         max_depth=args.max_depth,
         min_samples_split=args.min_samples_split,
@@ -87,9 +88,26 @@ def main():
     )
 
     # Pipeline
+    try:
+        bagger = BaggingClassifier(
+            estimator=base_tree,
+            n_estimators=100,
+            bootstrap=True,
+            n_jobs=-1,
+            random_state=args.random_state
+        )
+    except TypeError:
+        bagger = BaggingClassifier(
+            base_estimator=base_tree,
+            n_estimators=100,
+            bootstrap=True,
+            n_jobs=-1,
+            random_state=args.random_state
+        )
+
     pipe = Pipeline(steps=[
         ("preprocess", pre),
-        ("model", tree)
+        ("model", bagger)
     ])
 
     # GridSearchCV – performs validation via cross-validation on the training set
@@ -97,9 +115,9 @@ def main():
     cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=args.random_state)
 
     param_grid = {
-        "model__max_depth": [3, 4, 5, None],
-        "model__min_samples_leaf": [1, 2, 3, 5],
-        "model__ccp_alpha": [0.0, 1e-4, 5e-4, 1e-3, 5e-3],
+        "model__estimator__max_depth": [3, 4, 5, None],
+        "model__estimator__min_samples_leaf": [1, 2, 3, 5],
+        "model__estimator__ccp_alpha": [0.0, 1e-4, 5e-4, 1e-3, 5e-3],
     }
 
     grid = GridSearchCV(
@@ -110,7 +128,24 @@ def main():
         n_jobs=-1,
         refit=True
     )
-    grid.fit(X_train, y_train)
+
+    try:
+        grid.fit(X_train, y_train)
+    except ValueError:
+        grid = GridSearchCV(
+            pipe,
+            param_grid={
+                "model__base_estimator__max_depth": [3, 4, 5, None],
+                "model__base_estimator__min_samples_leaf": [1, 2, 3, 5],
+                "model__base_estimator__ccp_alpha": [0.0, 1e-4, 5e-4, 1e-3, 5e-3],
+            },
+            scoring="accuracy",
+            cv=cv,
+            n_jobs=-1,
+            refit=True
+        )
+        grid.fit(X_train, y_train)
+
     print(f"\nGridSearchCV used StratifiedKFold(n_splits={n_splits})")
     print("Best params from GridSearchCV:", grid.best_params_)
     print(f"Best CV score: {grid.best_score_:.3f}")
@@ -176,7 +211,22 @@ def pretty_print_tree(trained_pipe: Pipeline, cat_features):
     """Pretty-print the learned tree using OHE feature names."""
     ohe = trained_pipe.named_steps["preprocess"].named_transformers_["cat"]
     feat_names = ohe.get_feature_names_out(cat_features)
-    tree_text = export_text(trained_pipe.named_steps["model"], feature_names=list(feat_names))
+
+    model = trained_pipe.named_steps["model"]
+    base = None
+    if hasattr(model, "estimators_") and len(model.estimators_) > 0:
+        base = model.estimators_[0]
+    elif hasattr(model, "estimator"):
+        base = model.estimator
+    elif hasattr(model, "base_estimator"):
+        base = model.base_estimator
+
+    if base is None:
+        print("\nPretty tree (train):")
+        print("[Model not fitted yet; no base estimator available]")
+        return
+
+    tree_text = export_text(base, feature_names=list(feat_names))
     print("\nPretty tree (train):")
     print(tree_text)
 
@@ -311,14 +361,24 @@ def plot_validation_curve_max_depth(estimator, X, y, cv, title="Validation Curve
     """
     param_range = [2, 3, 4, 5, 6, None]
 
-    train_scores, val_scores = validation_curve(
-        estimator, X, y,
-        param_name="model__max_depth",
-        param_range=param_range,
-        cv=cv,
-        scoring="accuracy",
-        n_jobs=-1
-    )
+    try:
+        train_scores, val_scores = validation_curve(
+            estimator, X, y,
+            param_name="model__estimator__max_depth",
+            param_range=param_range,
+            cv=cv,
+            scoring="accuracy",
+            n_jobs=-1
+        )
+    except ValueError:
+        train_scores, val_scores = validation_curve(
+            estimator, X, y,
+            param_name="model__base_estimator__max_depth",
+            param_range=param_range,
+            cv=cv,
+            scoring="accuracy",
+            n_jobs=-1
+        )
 
     train_mean = train_scores.mean(axis=1)
     train_std  = train_scores.std(axis=1)
